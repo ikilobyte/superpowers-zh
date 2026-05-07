@@ -26,7 +26,7 @@ description: "在任何创造性工作之前必须使用此技能——创建功
 3. **提出澄清问题** — 每次一个，了解目的/约束/成功标准
 4. **提出 2-3 种方案** — 附带权衡分析和你的推荐
 5. **展示设计** — 按复杂度分节展示，每节展示后获得用户批准
-6. **编写设计文档** — 保存到 `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` 并 commit
+6. **编写设计文档** — 保存到 `docs/superpowers/specs/YYYY-MM-DD-HHmm-<topic>-design.md`（`HH` 小时、`mm` 分钟，例：`2026-05-07-1430-...`）并 commit
 7. **规格自检** — 快速内联检查占位符、矛盾、模糊性、范围（详见下方）
 8. **用户审查书面规格** — 在继续之前请用户审查规格文件
 9. **过渡到实现** — 调用 writing-plans 技能创建实现计划
@@ -108,7 +108,7 @@ digraph brainstorming {
 
 **文档：**
 
-- 将验证通过的设计（规格说明）写入 `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`
+- 将验证通过的设计（规格说明）写入 `docs/superpowers/specs/YYYY-MM-DD-HHmm-<topic>-design.md`（`HH` 小时、`mm` 分钟，例：`2026-05-07-1430-...`）
   - （用户对规格位置的偏好优先于此默认值）
 - 如果可用，使用 elements-of-style:writing-clearly-and-concisely 技能
 - 将设计文档 commit 到 git

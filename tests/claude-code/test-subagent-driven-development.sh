@@ -28,12 +28,18 @@ fi
 
 echo ""
 
-# Test 2: Verify skill describes correct workflow order
-echo "Test 2: Workflow ordering..."
+# Test 2: Verify skill describes the single review stage
+echo "Test 2: Review workflow..."
 
-output=$(run_claude "In the subagent-driven-development skill, what comes first: spec compliance review or code quality review? Be specific about the order." 30)
+output=$(run_claude "In the subagent-driven-development skill, after an implementer finishes a task, what reviewer stage runs before marking the task complete? Are there any additional reviewer stages?" 30)
 
-if assert_order "$output" "spec.*compliance" "code.*quality" "Spec compliance before code quality"; then
+if assert_contains "$output" "spec.*compliance\|规格.*合规" "Spec compliance review is required"; then
+    : # pass
+else
+    exit 1
+fi
+
+if assert_contains "$output" "only\|just\|single\|no additional\|只有\|仅\|只" "No additional reviewer stages"; then
     : # pass
 else
     exit 1
