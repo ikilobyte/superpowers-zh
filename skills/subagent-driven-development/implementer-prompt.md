@@ -116,8 +116,10 @@ Task tool (general-purpose):
     - 我是否避免了过度构建（YAGNI）？
     - 我是否只构建了被要求的内容？
     - 我是否遵循了代码库中的已有模式？
-    - 我是否只动了 touches 范围内的文件？运行 `git diff --name-only HEAD~1`
-      核对一下，如果发现越界文件，要么把它们恢复，要么以 NEEDS_CONTEXT 回报
+    - 我是否只动了 touches 范围内的文件？运行
+      `git diff --name-only <base>..HEAD`（<base> 由控制者填入，通常是
+      任务开始前的 ref）核对一下——TDD 节奏下你会有多个 commit，不能用
+      `HEAD~1`。如果发现越界文件，要么把它们恢复，要么以 NEEDS_CONTEXT 回报
 
     **测试：**
     - 测试是否真正验证了行为（而非只是 mock 行为）？
