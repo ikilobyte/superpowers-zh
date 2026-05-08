@@ -2,6 +2,17 @@
 
 分派实现子智能体时使用此模板。
 
+## 控制者使用须知（不属于 prompt body）
+
+本模板是**单个** implementer 的 prompt 内容。dispatch 节奏由 SKILL.md 的"并行 dispatch 协议"章节规定，不要因为本模板用单数语气（"分派子智能体"、"Task tool: ..."）就误以为一次只发一个：
+
+- 本层只有 1 个任务时：发 1 个 Agent 调用
+- 本层有 N 个任务时：**必须在同一条 assistant message 内发出 N 个 Agent 调用**，每个填入对应 worktree 路径
+
+dispatch 前请先做 SKILL.md 规定的强制自检（在 assistant message 中写出"本层待 dispatch：N 个任务 / 本条消息将包含 N 个 Agent tool use block"），然后一次性写够 N 个。正确/错误形态见 SKILL.md 的"反模式 vs 正确形态"章节。
+
+---
+
 ```
 Task tool (general-purpose):
   description: "实现任务 N：[任务名称]"

@@ -4,6 +4,17 @@
 
 **目的：** 验证实现者是否构建了所要求的内容（不多不少）
 
+## 控制者使用须知（不属于 prompt body）
+
+本模板是**单个** reviewer 的 prompt 内容。dispatch 节奏由 SKILL.md 的"并行 dispatch 协议"章节规定，不要因为本模板用单数语气就误以为一次只发一个 reviewer：
+
+- 本层只有 1 个任务时：发 1 个 Agent 调用
+- 本层有 N 个任务通过 implementer 阶段时：**必须在同一条 assistant message 内发出 N 个 reviewer Agent 调用**
+
+reviewer 阶段的并行同样关键——日志里有真实失败案例是 implementer 阶段单发、reviewer 阶段也跟着单发，整层耗时翻 N 倍。dispatch 前请先做 SKILL.md 规定的强制自检（"本层待 dispatch：N 个任务 / 本条消息将包含 N 个 Agent tool use block"），然后一次性写够 N 个。
+
+---
+
 ```
 Task tool (general-purpose):
   description: "审查任务 N 的规格合规性"

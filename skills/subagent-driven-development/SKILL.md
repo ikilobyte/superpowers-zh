@@ -94,6 +94,7 @@ digraph process {
     "本层全部通过：按依赖顺序 merge worktree 回主分支" [shape=box];
     "merge 冲突?" [shape=diamond];
     "停下报告用户（不擅自解决）" [shape=box];
+    "清理本层 worktree 与已合并分支" [shape=box];
     "记录 layer_end_ts，TodoWrite 标记本层完成" [shape=box];
     "输出耗时汇总表" [shape=box];
     "使用 superpowers:finishing-a-development-branch" [shape=box style=filled fillcolor=lightgreen];
@@ -114,7 +115,8 @@ digraph process {
     "有任务被打回?" -> "本层全部通过：按依赖顺序 merge worktree 回主分支" [label="否"];
     "本层全部通过：按依赖顺序 merge worktree 回主分支" -> "merge 冲突?";
     "merge 冲突?" -> "停下报告用户（不擅自解决）" [label="是"];
-    "merge 冲突?" -> "记录 layer_end_ts，TodoWrite 标记本层完成" [label="否"];
+    "merge 冲突?" -> "清理本层 worktree 与已合并分支" [label="否"];
+    "清理本层 worktree 与已合并分支" -> "记录 layer_end_ts，TodoWrite 标记本层完成";
     "记录 layer_end_ts，TodoWrite 标记本层完成" -> "还有剩余 Layer?";
     "还有剩余 Layer?" -> "输出耗时汇总表" [label="否"];
     "输出耗时汇总表" -> "使用 superpowers:finishing-a-development-branch";
@@ -122,6 +124,55 @@ digraph process {
 ```
 
 **关于问答阶段：** 由于同层多任务并行，implementer 不再有"开工前提问"的同步窗口。控制者必须在 dispatch 之前就把任务上下文写得足够完整——任何 implementer 在工作中卡住，统一以 NEEDS_CONTEXT 状态回报，控制者补完上下文后重新 dispatch。这要求计划本身的质量更高。
+
+## 并行 dispatch 协议（最关键）
+
+**控制者最容易犯的错：嘴上说"并行"，工具调用一次只发一个。** 这是 Claude 的默认行为倾向（一次一个工具、看返回、再决定下一步），会让本技能的提速效果完全失效——本层 N 个任务被串行成 N 倍时间。光在文档里写"必须并行"治不好，模型会读到、会复述、会在事后承认错了，但下一轮还是单发。
+
+**强制自检（每次 dispatch 前都做）：** 在 assistant message 中先写出这两行 plain text，再调用工具：
+
+```
+本层待 dispatch：N 个任务（任务 A、B、C…）
+本条消息将包含：N 个 Agent tool use block
+```
+
+写完之后生成工具调用时**必须凑够 N 个**。implementer / reviewer / 修复 dispatch 都按这个协议走。如果你发现自己只想发 1 个工具调用，停下——重读上面那两行，然后一次性把 N 个 Agent tool use 全部写在同一条消息里。
+
+**绝不：**
+- 发 1 个 Agent，等返回，再发下一个（这就是串行）
+- 用"先看看第一个怎么样"或"稳一点逐个来"作为分批发送的理由——本技能就是为同时启动设计的，逐个来等于不用本技能
+- 在 reviewer 阶段松懈成单发（reviewer 的并行同样关键，不要因为"审查比实现轻"就退化）
+
+## 反模式 vs 正确形态
+
+**❌ 反模式（来自真实失败日志）：**
+
+```
+消息 1：[narration "并行 dispatch 4 个 implementer"]
+        Agent(任务 1)                          ← 只发了 1 个
+[等待 task 1 完成]
+消息 2：[narration "我犯了个错，应该并行"]
+        Agent(任务 2)                          ← 又只发了 1 个
+[等待 task 2 完成]
+消息 3：[narration "并行 dispatch 剩余两个"]
+        Agent(任务 3)                          ← 还是只发了 1 个
+... 5 次 dispatch 全单发，零次并行 ...
+```
+
+每条消息都在 narration 里"承诺并行"，但工具调用还是一次一个。这是本技能最大的威胁——必须靠上一节的强制自检拦住。
+
+**✅ 正确形态：**
+
+```
+消息 1：[narration "本层 4 个任务，本条消息包含 4 个 Agent tool use"]
+        Agent(任务 1, worktree=.../task-1)
+        Agent(任务 2, worktree=.../task-2)
+        Agent(任务 3, worktree=.../task-3)
+        Agent(任务 5, worktree=.../task-5)
+[一次性等 4 个 implementer 全部返回]
+```
+
+一条 assistant message 包含本层全部 N 个 Agent tool use，顺序无所谓，全部同时启动。reviewer 阶段同理。
 
 ## 模型选择
 
@@ -162,6 +213,32 @@ digraph process {
 - 同层只有部分任务被打回时，仅对被打回的任务并行 dispatch 修复，其他已通过的任务不动
 - 整层都通过审查后才能 merge——不允许"先 merge 已通过的，剩下慢慢修"，否则后续任务的 worktree 会基于不同的主干状态，破坏并行的隔离前提
 
+## merge 与清理
+
+本层全部通过审查后，按依赖顺序把 worktree 上的任务分支 merge 回主分支，**merge 完立刻清理对应的 worktree 和分支**——它们已经完成使命，留下来只会堆积成垃圾（10 任务 = 10 个目录 + 10 个分支）。
+
+**对本层每个任务依次执行：**
+
+```bash
+# 1. 切回主分支并 merge
+git checkout <main-branch>          # 例如 refactory-xml
+git merge --no-ff <task-branch>     # 例如 task-1-popconfirm
+
+# 2. merge 成功后立刻清理
+git worktree remove <worktree-path>     # 例如 ../ai-video-task-1
+git branch -d <task-branch>             # 用 -d 不用 -D
+```
+
+**为什么用 `-d` 而不是 `-D`：** `-d` 会让 git 自检"这个分支是否已合并到当前 HEAD"，没合并就拒绝删——这是安全网，万一某个任务因为冲突没真正进主分支但分支被强删，commit 就丢了。如果 `-d` 报错，停下查清楚为什么没合并，**绝不**用 `-D` 强删绕过。
+
+**merge 冲突时：** 停下报告用户（不擅自解决），暂时不要清理这个 worktree。冲突解决并 merge 完成后再清理。
+
+**绝不：**
+- merge 完不清理（worktree 和分支堆积是 SDD 跑多层后最常见的脏环境）
+- 用 `git branch -D` 强删未合并的分支
+- 在 worktree 里直接 `rm -rf` 删目录（必须用 `git worktree remove` 让 git 同步元数据）
+- 跨层延后清理（"等所有 layer 跑完一起清"——出错时定位困难，且占用磁盘）
+
 ## 耗时统计
 
 由于同层任务在墙钟时间上是并行发生的，**以"层"为单位记录耗时才能反映用户真实感受到的等待时间**。单独累计每个任务的耗时会重复计入并失真。
@@ -171,7 +248,7 @@ digraph process {
 1. 进入一层之前，运行 `date +%s` 拿到 `layer_start_ts`
 2. 初始化本层的子智能体计数器：`layer_agent_calls = 0`
 3. 每分派一次 implementer / reviewer / 修复子智能体，计数器 `+1`（不论是哪个任务）
-4. 本层全部 merge 回主分支后，运行 `date +%s` 拿到 `layer_end_ts`
+4. 本层全部 merge 回主分支**并清理 worktree / 分支**之后，运行 `date +%s` 拿到 `layer_end_ts`（清理也算本层耗时——merge + 清理才是工作的真正结束）
 5. 计算 `layer_duration = layer_end_ts - layer_start_ts`，立即向用户简报：`Layer N 完成，耗时 Xm Ys（K 个并行任务，Z 次子智能体调用）`
 6. 在内存中维护 `[(layer_id, [task_names], duration, agent_calls), ...]` 列表
 
@@ -254,8 +331,10 @@ implementer-2：移除 --json，加上进度报告，已提交
 [只对任务 2 dispatch reviewer → layer_agent_calls=8]
 reviewer-2：✅ 现在符合规格
 
-[本层全部通过，按依赖顺序 merge 回主分支]
-[merge task-1 ✓, merge task-2 ✓, merge task-3 ✓ — 无冲突]
+[本层全部通过，按依赖顺序 merge 回主分支并清理]
+[merge task-1 ✓ → worktree remove + branch -d ✓]
+[merge task-2 ✓ → worktree remove + branch -d ✓]
+[merge task-3 ✓ → worktree remove + branch -d ✓]
 [date +%s → layer_end_ts=1715141262，duration=462s=7m 42s]
 [TodoWrite：任务 1, 2, 3 完成]
 你：✅ Layer 0 完成，耗时 7m 42s（3 个并行任务，8 次子智能体调用：3 实现 + 3 审查 + 1 修复 + 1 复审）
@@ -267,7 +346,7 @@ reviewer-2：✅ 现在符合规格
 implementer-4：DONE
 [dispatch reviewer → layer_agent_calls=2]
 reviewer-4：✅
-[merge task-4 ✓]
+[merge task-4 ✓ → worktree remove + branch -d ✓]
 [layer_end_ts=1715141525，duration=4m 20s]
 你：✅ Layer 1 完成，耗时 4m 20s（1 个任务，2 次子智能体调用）
 
@@ -330,6 +409,8 @@ reviewer-4：✅
 - 同层任务不并行（同层有多个任务时必须并行 dispatch，每个一个 worktree——这是本技能提速的核心）
 - 把所有任务塞进同一个工作区（即使是同层并行也必须 worktree 隔离，否则文件会冲突）
 - merge 冲突时擅自解决（停下报告用户，让人决定如何处理）
+- merge 完不清理本层 worktree 和分支（每个任务 merge 后立刻 `git worktree remove` + `git branch -d`，详见"merge 与清理"章节）
+- 用 `git branch -D` 强删未合并的分支（必须用 `-d`，让 git 自检合并状态）
 - 让子智能体读取计划文件（应提供完整文本）
 - 跳过场景铺设上下文（同层并行没有"开工前提问"窗口，上下文必须一次给足）
 - 忽视子智能体的 NEEDS_CONTEXT 报告（必须补完上下文再重新 dispatch）
