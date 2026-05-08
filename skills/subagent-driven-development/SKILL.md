@@ -45,6 +45,7 @@ digraph process {
 
     subgraph cluster_per_task {
         label="每个任务";
+        "记录 start_ts (date +%s)" [shape=box];
         "分派实现子智能体 (./implementer-prompt.md)" [shape=box];
         "实现子智能体有疑问?" [shape=diamond];
         "回答问题，提供上下文" [shape=box];
@@ -53,13 +54,16 @@ digraph process {
         "规格审查子智能体确认代码匹配规格?" [shape=diamond];
         "实现子智能体修复规格差距" [shape=box];
         "在 TodoWrite 中标记任务完成" [shape=box];
+        "记录 end_ts，登记本任务耗时与子智能体次数" [shape=box];
     }
 
     "读取计划，提取所有任务的完整文本，记录上下文，创建 TodoWrite" [shape=box];
     "还有剩余任务?" [shape=diamond];
+    "输出耗时汇总表" [shape=box];
     "使用 superpowers:finishing-a-development-branch" [shape=box style=filled fillcolor=lightgreen];
 
-    "读取计划，提取所有任务的完整文本，记录上下文，创建 TodoWrite" -> "分派实现子智能体 (./implementer-prompt.md)";
+    "读取计划，提取所有任务的完整文本，记录上下文，创建 TodoWrite" -> "记录 start_ts (date +%s)";
+    "记录 start_ts (date +%s)" -> "分派实现子智能体 (./implementer-prompt.md)";
     "分派实现子智能体 (./implementer-prompt.md)" -> "实现子智能体有疑问?";
     "实现子智能体有疑问?" -> "回答问题，提供上下文" [label="是"];
     "回答问题，提供上下文" -> "分派实现子智能体 (./implementer-prompt.md)";
@@ -69,9 +73,11 @@ digraph process {
     "规格审查子智能体确认代码匹配规格?" -> "实现子智能体修复规格差距" [label="否"];
     "实现子智能体修复规格差距" -> "分派规格审查子智能体 (./spec-reviewer-prompt.md)" [label="重新审查"];
     "规格审查子智能体确认代码匹配规格?" -> "在 TodoWrite 中标记任务完成" [label="是"];
-    "在 TodoWrite 中标记任务完成" -> "还有剩余任务?";
-    "还有剩余任务?" -> "分派实现子智能体 (./implementer-prompt.md)" [label="是"];
-    "还有剩余任务?" -> "使用 superpowers:finishing-a-development-branch" [label="否"];
+    "在 TodoWrite 中标记任务完成" -> "记录 end_ts，登记本任务耗时与子智能体次数";
+    "记录 end_ts，登记本任务耗时与子智能体次数" -> "还有剩余任务?";
+    "还有剩余任务?" -> "记录 start_ts (date +%s)" [label="是"];
+    "还有剩余任务?" -> "输出耗时汇总表" [label="否"];
+    "输出耗时汇总表" -> "使用 superpowers:finishing-a-development-branch";
 }
 ```
 
@@ -108,6 +114,36 @@ digraph process {
 
 **绝不** 忽略上报或在不做任何更改的情况下让同一模型重试。如果实现者说卡住了，说明有什么东西需要改变。
 
+## 耗时统计
+
+每个任务从分派**第一个**子智能体之前开始计时，到 TodoWrite 标记完成之后结束。这段端到端耗时自然涵盖了实现 + 自审 + 规格审查 + 修复迭代的全部子智能体调用，无需子智能体自行汇报。
+
+**控制者协议（任务级）：**
+
+1. 任务开始前，运行 `date +%s` 拿到 `start_ts`
+2. 同时初始化本任务的子智能体计数器：`agent_calls = 0`
+3. 每分派一次实现/审查子智能体，计数器 `+1`
+4. 任务在 TodoWrite 中标记完成后，运行 `date +%s` 拿到 `end_ts`
+5. 计算 `duration = end_ts - start_ts`，立即向用户简报：`任务 N 完成，耗时 Xm Ys（Z 次子智能体调用）`
+6. 在内存中维护 `[(任务名, duration, agent_calls), ...]` 列表
+
+**所有任务完成后：** 在交接给 `superpowers:finishing-a-development-branch` 之前，输出汇总表：
+
+```
+| 任务 | 耗时 | 子智能体次数 |
+| --- | --- | --- |
+| 1. Hook 安装脚本 | 3m 42s | 2（1 实现 + 1 审查） |
+| 2. 恢复模式 | 7m 18s | 4（1 实现 + 2 审查 + 1 修复） |
+| **总计** | **11m 00s** | **6** |
+```
+
+**为什么记录子智能体次数：** 单凭耗时无法区分"任务大"和"审查反复"。次数高说明规格不够清晰或任务拆得不够细，是后续优化计划的信号。
+
+**格式细则：**
+- 耗时小于 60 秒按 `Xs` 显示，1 分钟以上按 `Xm Ys`，1 小时以上按 `Xh Ym`
+- 子智能体次数按"实现 + 审查 + 修复"分项计数，便于诊断瓶颈
+- 如果某任务被中途阻塞重新分派，仍按一次完整任务计入，但在备注列说明
+
 ## 提示词模板
 
 - `./implementer-prompt.md` - 分派实现子智能体
@@ -124,8 +160,9 @@ digraph process {
 
 任务 1：Hook 安装脚本
 
+[date +%s → start_ts=1715140800，agent_calls=0]
 [获取任务 1 的文本和上下文（已提取）]
-[分派实现子智能体，附带完整任务文本 + 上下文]
+[分派实现子智能体，附带完整任务文本 + 上下文 → agent_calls=1]
 
 实现者："在我开始之前——hook 应该安装在用户级别还是系统级别？"
 
@@ -138,15 +175,18 @@ digraph process {
   - 自审：发现遗漏了 --force 参数，已添加
   - 已提交
 
-[分派规格合规审查]
+[分派规格合规审查 → agent_calls=2]
 规格审查者：✅ 符合规格 - 所有需求已满足，无多余内容
 
 [标记任务 1 完成]
+[date +%s → end_ts=1715141022，duration=222s=3m 42s]
+你：✅ 任务 1 完成，耗时 3m 42s（2 次子智能体调用：1 实现 + 1 审查）
 
 任务 2：恢复模式
 
+[date +%s → start_ts=1715141025，agent_calls=0]
 [获取任务 2 的文本和上下文（已提取）]
-[分派实现子智能体，附带完整任务文本 + 上下文]
+[分派实现子智能体 → agent_calls=1]
 
 实现者：[无疑问，直接开始]
 实现者：
@@ -155,20 +195,33 @@ digraph process {
   - 自审：一切正常
   - 已提交
 
-[分派规格合规审查]
+[分派规格合规审查 → agent_calls=2]
 规格审查者：❌ 问题：
   - 缺失：进度报告（规格要求"每 100 项报告一次"）
   - 多余：添加了 --json 参数（未被要求）
 
-[实现者修复问题]
+[实现者修复问题 → agent_calls=3]
 实现者：移除了 --json 参数，添加了进度报告
 
-[规格审查者再次审查]
+[规格审查者再次审查 → agent_calls=4]
 规格审查者：✅ 现在符合规格
 
 [标记任务 2 完成]
+[date +%s → end_ts=1715141463，duration=438s=7m 18s]
+你：✅ 任务 2 完成，耗时 7m 18s（4 次子智能体调用：1 实现 + 2 审查 + 1 修复）
 
 ...
+
+[全部任务完成后，输出汇总表]
+
+| 任务 | 耗时 | 子智能体次数 |
+| --- | --- | --- |
+| 1. Hook 安装脚本 | 3m 42s | 2（1 实现 + 1 审查） |
+| 2. 恢复模式 | 7m 18s | 4（1 实现 + 2 审查 + 1 修复） |
+| ... | ... | ... |
+| **总计** | **Xm Ys** | **N** |
+
+[交接给 superpowers:finishing-a-development-branch]
 
 完成！
 ```
@@ -217,6 +270,8 @@ digraph process {
 - 跳过审查循环（审查者发现问题 = 实现者修复 = 再次审查）
 - 让实现者的自审替代规格合规性审查（两者都需要）
 - 在任一审查有未解决问题时就进入下一个任务
+- 跳过耗时记录（每个任务都需 `start_ts` / `end_ts` 与子智能体计数；遗漏会让汇总表失真）
+- 估算耗时代替实测（必须用 `date +%s`，不要事后凭印象凑数）
 
 **如果子智能体提问：**
 - 清晰完整地回答
