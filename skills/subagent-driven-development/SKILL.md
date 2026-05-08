@@ -35,7 +35,43 @@ digraph when_to_use {
 - 同一会话（无上下文切换）
 - 每个任务全新子智能体（无上下文污染）
 - 每个任务后做规格合规性审查
+- 同层独立任务并行 dispatch（按计划的依赖图分层）
 - 更快的迭代（任务间无需人工介入）
+
+## 准备阶段
+
+执行任何任务之前，必须先把计划里的依赖图解析成可执行的分层方案。这一步只做一次。
+
+**步骤：**
+
+1. **读取计划**，一次性提取所有任务的完整文本、`touches`、`depends_on`
+2. **校验字段完整性**：每个任务都必须有 `touches` 和 `depends_on`。如果有遗漏，停下报告用户，请求回到 writing-plans 补全——不要自己脑补依赖关系
+3. **把 touches 冲突转成伪依赖**：对每对任务 (A, B)，如果它们的 `touches` 文件集相交且彼此无 `depends_on` 关系，按任务编号给较晚的那个加一条伪依赖（B 的 depends_on 增加 A）。这样分层只看依赖图就够了
+4. **构建分层并行图**：
+   - Layer 0 = 所有 `depends_on: 无` 的任务
+   - Layer N = 所有依赖只在 Layer 0..N-1 中的任务
+5. **向用户展示分层方案，请求确认**：
+
+   ```
+   分层并行计划：
+
+   Layer 0（并行）:
+     ‖ 任务 1 [src/a.ts]
+     ‖ 任务 2 [src/b.ts]
+   Layer 1（依赖 Layer 0）:
+     ‖ 任务 3 [src/c.ts]
+     ‖ 任务 4 [src/d.ts]
+   Layer 2（任务 5 与任务 1 文件冲突，被推后）:
+     ‖ 任务 5 [src/a.ts]
+
+   预计提速：5 串行 → 3 层 ≈ 1.7x（实际取决于各任务耗时）
+   ```
+
+   等待用户确认后才开始执行。
+
+6. **创建 TodoWrite**，按层组织任务
+
+**为什么需要用户确认：** 自动解析依赖图基于计划标注，但标注可能有遗漏或错标。用户在执行前看一眼方案，是廉价但高价值的一道闸门，避免并行翻车。
 
 ## 流程
 
@@ -43,43 +79,49 @@ digraph when_to_use {
 digraph process {
     rankdir=TB;
 
-    subgraph cluster_per_task {
-        label="每个任务";
-        "记录 start_ts (date +%s)" [shape=box];
-        "分派实现子智能体 (./implementer-prompt.md)" [shape=box];
-        "实现子智能体有疑问?" [shape=diamond];
-        "回答问题，提供上下文" [shape=box];
-        "实现子智能体实现、测试、提交、自审" [shape=box];
-        "分派规格审查子智能体 (./spec-reviewer-prompt.md)" [shape=box];
-        "规格审查子智能体确认代码匹配规格?" [shape=diamond];
-        "实现子智能体修复规格差距" [shape=box];
-        "在 TodoWrite 中标记任务完成" [shape=box];
-        "记录 end_ts，登记本任务耗时与子智能体次数" [shape=box];
-    }
-
-    "读取计划，提取所有任务的完整文本，记录上下文，创建 TodoWrite" [shape=box];
-    "还有剩余任务?" [shape=diamond];
+    "准备阶段：解析依赖图、用户确认、TodoWrite" [shape=box];
+    "还有剩余 Layer?" [shape=diamond];
+    "记录 layer_start_ts (date +%s)" [shape=box];
+    "为本层每个任务创建独立 worktree" [shape=box];
+    "并行 dispatch 实现子智能体（每任务一个，传入 worktree 路径）" [shape=box];
+    "等待全部 implementer 回报" [shape=box];
+    "全部 DONE?" [shape=diamond];
+    "处理 BLOCKED / NEEDS_CONTEXT：补上下文或拆分后重新 dispatch" [shape=box];
+    "并行 dispatch 规格审查子智能体（每任务一个）" [shape=box];
+    "等待全部 reviewer 回报" [shape=box];
+    "有任务被打回?" [shape=diamond];
+    "对被打回任务并行 dispatch 修复 → 再审" [shape=box];
+    "本层全部通过：按依赖顺序 merge worktree 回主分支" [shape=box];
+    "merge 冲突?" [shape=diamond];
+    "停下报告用户（不擅自解决）" [shape=box];
+    "记录 layer_end_ts，TodoWrite 标记本层完成" [shape=box];
     "输出耗时汇总表" [shape=box];
     "使用 superpowers:finishing-a-development-branch" [shape=box style=filled fillcolor=lightgreen];
 
-    "读取计划，提取所有任务的完整文本，记录上下文，创建 TodoWrite" -> "记录 start_ts (date +%s)";
-    "记录 start_ts (date +%s)" -> "分派实现子智能体 (./implementer-prompt.md)";
-    "分派实现子智能体 (./implementer-prompt.md)" -> "实现子智能体有疑问?";
-    "实现子智能体有疑问?" -> "回答问题，提供上下文" [label="是"];
-    "回答问题，提供上下文" -> "分派实现子智能体 (./implementer-prompt.md)";
-    "实现子智能体有疑问?" -> "实现子智能体实现、测试、提交、自审" [label="否"];
-    "实现子智能体实现、测试、提交、自审" -> "分派规格审查子智能体 (./spec-reviewer-prompt.md)";
-    "分派规格审查子智能体 (./spec-reviewer-prompt.md)" -> "规格审查子智能体确认代码匹配规格?";
-    "规格审查子智能体确认代码匹配规格?" -> "实现子智能体修复规格差距" [label="否"];
-    "实现子智能体修复规格差距" -> "分派规格审查子智能体 (./spec-reviewer-prompt.md)" [label="重新审查"];
-    "规格审查子智能体确认代码匹配规格?" -> "在 TodoWrite 中标记任务完成" [label="是"];
-    "在 TodoWrite 中标记任务完成" -> "记录 end_ts，登记本任务耗时与子智能体次数";
-    "记录 end_ts，登记本任务耗时与子智能体次数" -> "还有剩余任务?";
-    "还有剩余任务?" -> "记录 start_ts (date +%s)" [label="是"];
-    "还有剩余任务?" -> "输出耗时汇总表" [label="否"];
+    "准备阶段：解析依赖图、用户确认、TodoWrite" -> "还有剩余 Layer?";
+    "还有剩余 Layer?" -> "记录 layer_start_ts (date +%s)" [label="是"];
+    "记录 layer_start_ts (date +%s)" -> "为本层每个任务创建独立 worktree";
+    "为本层每个任务创建独立 worktree" -> "并行 dispatch 实现子智能体（每任务一个，传入 worktree 路径）";
+    "并行 dispatch 实现子智能体（每任务一个，传入 worktree 路径）" -> "等待全部 implementer 回报";
+    "等待全部 implementer 回报" -> "全部 DONE?";
+    "全部 DONE?" -> "处理 BLOCKED / NEEDS_CONTEXT：补上下文或拆分后重新 dispatch" [label="否"];
+    "处理 BLOCKED / NEEDS_CONTEXT：补上下文或拆分后重新 dispatch" -> "并行 dispatch 实现子智能体（每任务一个，传入 worktree 路径）";
+    "全部 DONE?" -> "并行 dispatch 规格审查子智能体（每任务一个）" [label="是"];
+    "并行 dispatch 规格审查子智能体（每任务一个）" -> "等待全部 reviewer 回报";
+    "等待全部 reviewer 回报" -> "有任务被打回?";
+    "有任务被打回?" -> "对被打回任务并行 dispatch 修复 → 再审" [label="是"];
+    "对被打回任务并行 dispatch 修复 → 再审" -> "等待全部 reviewer 回报";
+    "有任务被打回?" -> "本层全部通过：按依赖顺序 merge worktree 回主分支" [label="否"];
+    "本层全部通过：按依赖顺序 merge worktree 回主分支" -> "merge 冲突?";
+    "merge 冲突?" -> "停下报告用户（不擅自解决）" [label="是"];
+    "merge 冲突?" -> "记录 layer_end_ts，TodoWrite 标记本层完成" [label="否"];
+    "记录 layer_end_ts，TodoWrite 标记本层完成" -> "还有剩余 Layer?";
+    "还有剩余 Layer?" -> "输出耗时汇总表" [label="否"];
     "输出耗时汇总表" -> "使用 superpowers:finishing-a-development-branch";
 }
 ```
+
+**关于问答阶段：** 由于同层多任务并行，implementer 不再有"开工前提问"的同步窗口。控制者必须在 dispatch 之前就把任务上下文写得足够完整——任何 implementer 在工作中卡住，统一以 NEEDS_CONTEXT 状态回报，控制者补完上下文后重新 dispatch。这要求计划本身的质量更高。
 
 ## 模型选择
 
@@ -114,35 +156,42 @@ digraph process {
 
 **绝不** 忽略上报或在不做任何更改的情况下让同一模型重试。如果实现者说卡住了，说明有什么东西需要改变。
 
+**并行场景下的处理：**
+- 同层多个 implementer 可能同时回报不同状态。**等所有 implementer 都回来再处理**——不要因为一个回报快就提前推进
+- 全部 DONE 才进入审查阶段；任何任务还在 BLOCKED / NEEDS_CONTEXT，先解决再统一进审查
+- 同层只有部分任务被打回时，仅对被打回的任务并行 dispatch 修复，其他已通过的任务不动
+- 整层都通过审查后才能 merge——不允许"先 merge 已通过的，剩下慢慢修"，否则后续任务的 worktree 会基于不同的主干状态，破坏并行的隔离前提
+
 ## 耗时统计
 
-每个任务从分派**第一个**子智能体之前开始计时，到 TodoWrite 标记完成之后结束。这段端到端耗时自然涵盖了实现 + 自审 + 规格审查 + 修复迭代的全部子智能体调用，无需子智能体自行汇报。
+由于同层任务在墙钟时间上是并行发生的，**以"层"为单位记录耗时才能反映用户真实感受到的等待时间**。单独累计每个任务的耗时会重复计入并失真。
 
-**控制者协议（任务级）：**
+**控制者协议（层级）：**
 
-1. 任务开始前，运行 `date +%s` 拿到 `start_ts`
-2. 同时初始化本任务的子智能体计数器：`agent_calls = 0`
-3. 每分派一次实现/审查子智能体，计数器 `+1`
-4. 任务在 TodoWrite 中标记完成后，运行 `date +%s` 拿到 `end_ts`
-5. 计算 `duration = end_ts - start_ts`，立即向用户简报：`任务 N 完成，耗时 Xm Ys（Z 次子智能体调用）`
-6. 在内存中维护 `[(任务名, duration, agent_calls), ...]` 列表
+1. 进入一层之前，运行 `date +%s` 拿到 `layer_start_ts`
+2. 初始化本层的子智能体计数器：`layer_agent_calls = 0`
+3. 每分派一次 implementer / reviewer / 修复子智能体，计数器 `+1`（不论是哪个任务）
+4. 本层全部 merge 回主分支后，运行 `date +%s` 拿到 `layer_end_ts`
+5. 计算 `layer_duration = layer_end_ts - layer_start_ts`，立即向用户简报：`Layer N 完成，耗时 Xm Ys（K 个并行任务，Z 次子智能体调用）`
+6. 在内存中维护 `[(layer_id, [task_names], duration, agent_calls), ...]` 列表
 
-**所有任务完成后：** 在交接给 `superpowers:finishing-a-development-branch` 之前，输出汇总表：
+**所有 Layer 完成后：** 在交接给 `superpowers:finishing-a-development-branch` 之前，输出汇总表：
 
 ```
-| 任务 | 耗时 | 子智能体次数 |
-| --- | --- | --- |
-| 1. Hook 安装脚本 | 3m 42s | 2（1 实现 + 1 审查） |
-| 2. 恢复模式 | 7m 18s | 4（1 实现 + 2 审查 + 1 修复） |
-| **总计** | **11m 00s** | **6** |
+| Layer | 并行任务 | 耗时 | 子智能体次数 |
+| --- | --- | --- | --- |
+| 0 | 任务 1, 任务 2, 任务 3 | 4m 22s | 6（3 实现 + 3 审查） |
+| 1 | 任务 4, 任务 5 | 6m 11s | 5（2 实现 + 2 审查 + 1 修复） |
+| **总计** | **5 个任务** | **10m 33s** | **11** |
 ```
 
-**为什么记录子智能体次数：** 单凭耗时无法区分"任务大"和"审查反复"。次数高说明规格不够清晰或任务拆得不够细，是后续优化计划的信号。
+**为什么记录子智能体次数：** 单凭耗时无法区分"任务大"和"审查反复"。次数显著高于"任务数 × 2"说明规格不够清晰或任务拆得不够细，是后续优化计划的信号。
 
 **格式细则：**
 - 耗时小于 60 秒按 `Xs` 显示，1 分钟以上按 `Xm Ys`，1 小时以上按 `Xh Ym`
 - 子智能体次数按"实现 + 审查 + 修复"分项计数，便于诊断瓶颈
-- 如果某任务被中途阻塞重新分派，仍按一次完整任务计入，但在备注列说明
+- 如果某任务被中途阻塞，需要补上下文重新 dispatch，仍归入该层耗时；备注列说明
+- 层只有一个任务时也按层记录，方便保持表格一致性
 
 ## 提示词模板
 
@@ -155,71 +204,85 @@ digraph process {
 你：我正在使用子智能体驱动开发来执行这个计划。
 
 [一次性读取计划文件：docs/superpowers/plans/feature-plan.md]
-[提取全部 5 个任务的完整文本和上下文]
-[用所有任务创建 TodoWrite]
+[提取全部 5 个任务的完整文本、touches、depends_on]
 
-任务 1：Hook 安装脚本
+准备阶段：
 
-[date +%s → start_ts=1715140800，agent_calls=0]
-[获取任务 1 的文本和上下文（已提取）]
-[分派实现子智能体，附带完整任务文本 + 上下文 → agent_calls=1]
+[校验：5 个任务都有 touches 和 depends_on ✓]
+[把 touches 冲突转成伪依赖：任务 5 与任务 1 都触及 src/cli/index.ts → 任务 5 加伪依赖任务 1]
+[分层]:
+  Layer 0: 任务 1, 任务 2, 任务 3（depends_on: 无）
+  Layer 1: 任务 4（依赖任务 2）
+  Layer 2: 任务 5（依赖任务 1，touches 冲突）
 
-实现者："在我开始之前——hook 应该安装在用户级别还是系统级别？"
+你：分层并行计划如下：
 
-你："用户级别（~/.config/superpowers/hooks/）"
+  Layer 0（并行）:
+    ‖ 任务 1：Hook 安装脚本 [src/cli/install.ts, src/cli/index.ts, tests/install.test.ts]
+    ‖ 任务 2：恢复模式 [src/cli/repair.ts, tests/repair.test.ts]
+    ‖ 任务 3：日志格式化 [src/log.ts, tests/log.test.ts]
+  Layer 1（依赖 Layer 0）:
+    ‖ 任务 4：日志聚合 [src/aggregate.ts, tests/aggregate.test.ts]
+  Layer 2（任务 5 与任务 1 文件冲突，被推后）:
+    ‖ 任务 5：CLI 帮助文本 [src/cli/index.ts]
 
-实现者："明白了。现在开始实现……"
-[稍后] 实现者：
-  - 实现了 install-hook 命令
-  - 添加了测试，5/5 通过
-  - 自审：发现遗漏了 --force 参数，已添加
-  - 已提交
+  预计：3 层 vs 5 串行（约 1.7x 提速，实际取决于任务耗时）。是否开始？
 
-[分派规格合规审查 → agent_calls=2]
-规格审查者：✅ 符合规格 - 所有需求已满足，无多余内容
+用户：开始
 
-[标记任务 1 完成]
-[date +%s → end_ts=1715141022，duration=222s=3m 42s]
-你：✅ 任务 1 完成，耗时 3m 42s（2 次子智能体调用：1 实现 + 1 审查）
+[创建 TodoWrite，按层组织 5 个任务]
 
-任务 2：恢复模式
+═══ Layer 0 ═══
 
-[date +%s → start_ts=1715141025，agent_calls=0]
-[获取任务 2 的文本和上下文（已提取）]
-[分派实现子智能体 → agent_calls=1]
+[date +%s → layer_start_ts=1715140800，layer_agent_calls=0]
+[为任务 1/2/3 各创建一个 worktree：.worktrees/task-1, task-2, task-3]
+[同一条消息中并行 dispatch 3 个 implementer，每个传入对应 worktree 路径 → layer_agent_calls=3]
 
-实现者：[无疑问，直接开始]
-实现者：
-  - 添加了 verify/repair 模式
-  - 8/8 测试通过
-  - 自审：一切正常
-  - 已提交
+[等待全部回报]
+implementer-1：DONE - install 命令 + 测试 5/5 通过，已提交
+implementer-2：DONE - repair 模式 + 测试 8/8 通过，已提交
+implementer-3：DONE - 日志格式化 + 测试 4/4 通过，已提交
 
-[分派规格合规审查 → agent_calls=2]
-规格审查者：❌ 问题：
-  - 缺失：进度报告（规格要求"每 100 项报告一次"）
-  - 多余：添加了 --json 参数（未被要求）
+[同一条消息中并行 dispatch 3 个 reviewer → layer_agent_calls=6]
+reviewer-1：✅ 符合规格
+reviewer-2：❌ 缺失"每 100 项进度报告"，多余 --json 参数
+reviewer-3：✅ 符合规格
 
-[实现者修复问题 → agent_calls=3]
-实现者：移除了 --json 参数，添加了进度报告
+[只对任务 2 dispatch 修复 → layer_agent_calls=7]
+implementer-2：移除 --json，加上进度报告，已提交
 
-[规格审查者再次审查 → agent_calls=4]
-规格审查者：✅ 现在符合规格
+[只对任务 2 dispatch reviewer → layer_agent_calls=8]
+reviewer-2：✅ 现在符合规格
 
-[标记任务 2 完成]
-[date +%s → end_ts=1715141463，duration=438s=7m 18s]
-你：✅ 任务 2 完成，耗时 7m 18s（4 次子智能体调用：1 实现 + 2 审查 + 1 修复）
+[本层全部通过，按依赖顺序 merge 回主分支]
+[merge task-1 ✓, merge task-2 ✓, merge task-3 ✓ — 无冲突]
+[date +%s → layer_end_ts=1715141262，duration=462s=7m 42s]
+[TodoWrite：任务 1, 2, 3 完成]
+你：✅ Layer 0 完成，耗时 7m 42s（3 个并行任务，8 次子智能体调用：3 实现 + 3 审查 + 1 修复 + 1 复审）
 
-...
+═══ Layer 1 ═══
 
-[全部任务完成后，输出汇总表]
+[date +%s → layer_start_ts=1715141265，layer_agent_calls=0]
+[创建 worktree .worktrees/task-4，dispatch implementer → layer_agent_calls=1]
+implementer-4：DONE
+[dispatch reviewer → layer_agent_calls=2]
+reviewer-4：✅
+[merge task-4 ✓]
+[layer_end_ts=1715141525，duration=4m 20s]
+你：✅ Layer 1 完成，耗时 4m 20s（1 个任务，2 次子智能体调用）
 
-| 任务 | 耗时 | 子智能体次数 |
-| --- | --- | --- |
-| 1. Hook 安装脚本 | 3m 42s | 2（1 实现 + 1 审查） |
-| 2. 恢复模式 | 7m 18s | 4（1 实现 + 2 审查 + 1 修复） |
-| ... | ... | ... |
-| **总计** | **Xm Ys** | **N** |
+═══ Layer 2 ═══（略，单任务流程同 Layer 1）
+
+[全部 Layer 完成后，输出汇总表]
+
+| Layer | 并行任务 | 耗时 | 子智能体次数 |
+| --- | --- | --- | --- |
+| 0 | 任务 1, 任务 2, 任务 3 | 7m 42s | 8（3 实现 + 3 审查 + 1 修复 + 1 复审） |
+| 1 | 任务 4 | 4m 20s | 2（1 实现 + 1 审查） |
+| 2 | 任务 5 | 3m 15s | 2（1 实现 + 1 审查） |
+| **总计** | **5 个任务** | **15m 17s** | **12** |
+
+（参考：纯串行预计约 25-30m）
 
 [交接给 superpowers:finishing-a-development-branch]
 
@@ -231,8 +294,7 @@ digraph process {
 **与手动执行相比：**
 - 子智能体自然遵循 TDD
 - 每个任务全新上下文（不会混淆）
-- 并行安全（子智能体不会互相干扰）
-- 子智能体可以提问（工作前和工作中都可以）
+- 同层并行 + worktree 隔离（子智能体不会互相干扰）
 
 **与 Executing Plans 相比：**
 - 同一会话（无交接）
@@ -240,10 +302,10 @@ digraph process {
 - 规格审查检查点自动化
 
 **效率提升：**
+- **分层并行是核心提速来源**：按依赖图把独立任务推到同一层并行 dispatch，墙钟时间 ≈ 各层最慢任务之和，而非所有任务串行之和
 - 无文件读取开销（控制者提供完整文本）
 - 控制者精确策划所需上下文
 - 子智能体预先获得完整信息
-- 问题在工作开始前就被提出（而非工作结束后）
 
 **审查关卡：**
 - 自审在交接前发现问题
@@ -252,31 +314,36 @@ digraph process {
 
 **成本：**
 - 更少子智能体调用（每个任务需要实现者 + 1 个审查者）
-- 控制者需要更多准备工作（预先提取所有任务）
+- 控制者需要更多准备工作（预先提取所有任务、解析依赖图、创建 worktree、merge）
 - 规格审查循环仍会增加迭代次数
-- 审查路径更短，但非规格类问题可能更晚暴露
+- 计划标注（touches / depends_on）质量直接决定并行效率
+- 同层任务并行后失去"开工前提问"窗口，要求计划上下文更充分
 
 ## 红线
 
 **绝不：**
 - 未经用户明确同意就在 main/master 分支上开始实现
+- 跳过准备阶段（不解析依赖图、不向用户确认就直接开干 = 并行翻车的最快路径）
 - 跳过规格合规性审查
 - 带着未修复的问题继续
-- 并行分派多个实现子智能体（会冲突）
+- 跨层并行（不同 Layer 的任务必须串行；同层才能并行）
+- 同层任务不并行（同层有多个任务时必须并行 dispatch，每个一个 worktree——这是本技能提速的核心）
+- 把所有任务塞进同一个工作区（即使是同层并行也必须 worktree 隔离，否则文件会冲突）
+- merge 冲突时擅自解决（停下报告用户，让人决定如何处理）
 - 让子智能体读取计划文件（应提供完整文本）
-- 跳过场景铺设上下文（子智能体需要理解任务在哪个环节）
-- 忽视子智能体的问题（在让它们继续之前先回答）
+- 跳过场景铺设上下文（同层并行没有"开工前提问"窗口，上下文必须一次给足）
+- 忽视子智能体的 NEEDS_CONTEXT 报告（必须补完上下文再重新 dispatch）
 - 在规格合规性上接受"差不多就行"（规格审查者发现问题 = 未完成）
 - 跳过审查循环（审查者发现问题 = 实现者修复 = 再次审查）
 - 让实现者的自审替代规格合规性审查（两者都需要）
-- 在任一审查有未解决问题时就进入下一个任务
-- 跳过耗时记录（每个任务都需 `start_ts` / `end_ts` 与子智能体计数；遗漏会让汇总表失真）
+- 在本层任一任务有未解决问题时就 merge 该层并进入下一层
+- 跳过耗时记录（每层都需 `layer_start_ts` / `layer_end_ts` 与子智能体计数；遗漏会让汇总表失真）
 - 估算耗时代替实测（必须用 `date +%s`，不要事后凭印象凑数）
 
-**如果子智能体提问：**
-- 清晰完整地回答
-- 必要时提供额外上下文
-- 不要催促它们进入实现阶段
+**如果子智能体以 NEEDS_CONTEXT 回报（并行模式下"提问"的形式）：**
+- 清晰完整地补全缺失上下文
+- 把补全的上下文加到原始任务文本中重新 dispatch
+- 不要靠主控制者临时手写代码绕过——这会污染上下文且不可重现
 
 **如果审查者发现问题：**
 - 实现者（同一子智能体）修复
@@ -291,8 +358,8 @@ digraph process {
 ## 集成
 
 **必需的工作流技能：**
-- **superpowers:using-git-worktrees** - 必需：在开始前建立隔离工作区
-- **superpowers:writing-plans** - 创建本技能执行的计划
+- **superpowers:using-git-worktrees** - 必需：本技能为每个并行任务都创建独立 worktree，依赖此技能提供的隔离机制
+- **superpowers:writing-plans** - 创建本技能执行的计划。**计划必须包含每个任务的 `touches` 和 `depends_on` 字段**——这是并行分层的输入。如果计划缺这两个字段，先回到 writing-plans 补齐
 - **superpowers:finishing-a-development-branch** - 所有任务完成后收尾
 
 **子智能体应使用：**
